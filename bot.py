@@ -5,103 +5,111 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 import threading
 
-# Загружаем переменные окружения
 load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
-MODERATOR_ID = 1955832136  # Замените на реальный ID модератора
+MODERATOR_ID = 1955832136
 
 bot = telebot.TeleBot(TOKEN)
 bot.remove_webhook()
 
-# Хранилище для группировки сообщений
-user_data = defaultdict(list)
-last_message_time = {}
-pending_confirmation = defaultdict(bool)
+# Хранилище для группировки альбомов
+user_albums = defaultdict(list)
+album_timers = {}
+pending_confirmations = set()
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, "Привет! Отправь мне фото с текстом (подписью), и я передам их на модерацию.")
+    bot.reply_to(message, "Привет! Отправь мне фото или альбом с текстом, и я передам их на модерацию.")
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     try:
-        # Получаем фото (берем самое высокое качество)
+        user_id = message.from_user.id
         photo = message.photo[-1].file_id
         caption = message.caption if message.caption else "Без описания"
-        user_id = message.from_user.id
         
-        # Добавляем фото в хранилище
-        user_data[user_id].append((photo, caption))
-        last_message_time[user_id] = datetime.now()
-        
-        # Если это первое фото в альбоме, запускаем таймер подтверждения
-        if not pending_confirmation[user_id]:
-            pending_confirmation[user_id] = True
-            threading.Timer(3.0, send_user_confirmation, args=[user_id]).start()
+        # Если это медиагруппа (альбом), обрабатываем все фото сразу
+        if message.media_group_id:
+            media_group_id = message.media_group_id
+            user_albums[(user_id, media_group_id)].append((photo, caption))
+            
+            # Запускаем таймер только для первого фото в альбоме
+            if (user_id, media_group_id) not in album_timers:
+                album_timers[(user_id, media_group_id)] = threading.Timer(
+                    2.0, process_album, 
+                    args=[user_id, media_group_id]
+                )
+                album_timers[(user_id, media_group_id)].start()
+        else:
+            # Одиночное фото
+            process_single_photo(user_id, photo, caption)
             
     except Exception as e:
         bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
-def send_user_confirmation(user_id):
-    """Отправляет одно подтверждение на весь альбом"""
-    if user_id not in user_data or not user_data[user_id]:
+def process_album(user_id, media_group_id):
+    """Обрабатывает собранный альбом"""
+    if (user_id, media_group_id) not in user_albums:
         return
-    
-    count = len(user_data[user_id])
-    if count > 1:
-        text = f"✅ Ваш альбом из {count} фото отправлен на модерацию!\n\n"
-    else:
-        text = "✅ Ваше фото отправлено на модерацию!\n\n"
-    
-    text += "При успешной проверке контент будет опубликован.\n"
-    text += "❌ Если не появится - значит не прошел модерацию."
-    
-    bot.send_message(user_id, text)
-    pending_confirmation[user_id] = False
-    send_to_moderator(user_id)
-
-def send_to_moderator(user_id):
-    if user_id not in user_data or not user_data[user_id]:
-        return
-    
-    # Получаем информацию о пользователе
+        
+    album = user_albums[(user_id, media_group_id)]
     user = bot.get_chat(user_id)
     username = f"@{user.username}" if user.username else f"ID:{user_id}"
     
-    # Создаем медиагруппу
-    media = []
-    for i, (photo, caption) in enumerate(user_data[user_id]):
+    # Отправляем подтверждение пользователю
+    if len(album) > 1:
+        bot.send_message(
+            user_id,
+            f"✅ Ваш альбом из {len(album)} фото отправлен на модерацию!\n\n"
+            "При успешной проверке контент будет опубликован.\n"
+            "❌ Если не появится - значит не прошел модерацию."
+        )
+    else:
+        bot.send_message(
+            user_id,
+            "✅ Ваше фото отправлено на модерацию!\n\n"
+            "При успешной проверке контент будет опубликован.\n"
+            "❌ Если не появится - значит не прошел модерацию."
+        )
+    
+    # Отправляем модератору
+    media_group = []
+    for i, (photo, caption) in enumerate(album):
         if i == 0:
-            # Первое фото с подписью
-            media.append(telebot.types.InputMediaPhoto(
+            media_group.append(telebot.types.InputMediaPhoto(
                 media=photo,
-                caption=f"Новый контент на модерацию от {username}\n\nТекст: {caption}"
+                caption=f"Новый контент от {username}\n\nТекст: {caption}"
             ))
         else:
-            # Остальные фото без подписи
-            media.append(telebot.types.InputMediaPhoto(media=photo))
+            media_group.append(telebot.types.InputMediaPhoto(media=photo))
     
-    # Отправляем альбом модератору
-    bot.send_media_group(MODERATOR_ID, media)
+    bot.send_media_group(MODERATOR_ID, media_group)
     
-    # Очищаем данные пользователя
-    del user_data[user_id]
-    del last_message_time[user_id]
+    # Очищаем
+    del user_albums[(user_id, media_group_id)]
+    del album_timers[(user_id, media_group_id)]
 
-# Запускаем проверку "зависших" альбомов
-def check_pending_albums():
-    while True:
-        now = datetime.now()
-        for user_id in list(last_message_time.keys()):
-            if now - last_message_time[user_id] > timedelta(seconds=10):
-                if user_id in pending_confirmation and pending_confirmation[user_id]:
-                    send_user_confirmation(user_id)
-        threading.Event().wait(5)
+def process_single_photo(user_id, photo, caption):
+    """Обрабатывает одиночное фото"""
+    user = bot.get_chat(user_id)
+    username = f"@{user.username}" if user.username else f"ID:{user_id}"
+    
+    # Отправляем подтверждение
+    bot.send_message(
+        user_id,
+        "✅ Ваше фото отправлено на модерацию!\n\n"
+        "При успешной проверке контент будет опубликован.\n"
+        "❌ Если не появится - значит не прошел модерацию."
+    )
+    
+    # Отправляем модератору
+    bot.send_photo(
+        MODERATOR_ID,
+        photo,
+        caption=f"Новый контент от {username}\n\nТекст: {caption}"
+    )
 
-thread = threading.Thread(target=check_pending_albums)
-thread.daemon = True
-thread.start()
-
+# Запускаем бота
 if __name__ == '__main__':
     print("Бот запущен...")
     bot.polling(non_stop=True)
