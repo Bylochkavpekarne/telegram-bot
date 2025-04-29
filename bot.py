@@ -8,10 +8,27 @@ load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
 MODERATOR_ID = 1955832136
 
+# Сначала создаем бота
 bot = telebot.TeleBot(TOKEN)
 bot.remove_webhook()
 
-# Хранилище для альбомов
+# Затем определяем класс ChatCleaner (если он вам нужен)
+class ChatCleaner:
+    def __init__(self, bot, moderators, log_channel_id):
+        self.bot = bot
+        self.moderators = moderators
+        self.log_channel_id = log_channel_id
+    
+    # Добавьте сюда методы класса по необходимости
+
+# Теперь можно создавать экземпляр ChatCleaner
+chat_cleaner = ChatCleaner(
+    bot=bot,
+    moderators=[MODERATOR_ID, 1955832136], 
+    log_channel_id=-1002585988988
+)
+
+# Остальной код остается без изменений
 user_albums = defaultdict(list)
 active_timers = {}
 
@@ -26,17 +43,12 @@ def handle_photo(message):
         photo = message.photo[-1].file_id
         caption = message.caption if message.caption else "Без описания"
         
-        # Ключ для группировки: user_id + media_group_id (если есть)
         album_key = (user_id, message.media_group_id) if message.media_group_id else (user_id, None)
-        
-        # Добавляем фото в альбом
         user_albums[album_key].append((photo, caption))
         
-        # Для альбомов: запускаем таймер только один раз
         if message.media_group_id and album_key not in active_timers:
             active_timers[album_key] = True
             threading.Timer(1.5, process_album, args=[album_key]).start()
-        # Для одиночных фото: обрабатываем сразу
         elif not message.media_group_id:
             process_single_photo(album_key)
             
@@ -55,7 +67,6 @@ def process_album(album_key):
     user = bot.get_chat(user_id)
     username = f"@{user.username}" if user.username else f"ID:{user_id}"
     
-    # Отправляем ОДНО подтверждение пользователю
     bot.send_message(
         user_id,
         f"✅ Ваш {'альбом' if len(album) > 1 else 'фото'} из {len(album)} {'фото' if len(album) > 1 else ''} отправлен на модерацию!\n\n"
@@ -63,7 +74,6 @@ def process_album(album_key):
         "❌ Если не появится - значит не прошел модерацию."
     )
     
-    # Отправляем модератору
     media_group = []
     for i, (photo, caption) in enumerate(album):
         media_group.append(telebot.types.InputMediaPhoto(
@@ -83,7 +93,6 @@ def process_single_photo(album_key):
     user = bot.get_chat(user_id)
     username = f"@{user.username}" if user.username else f"ID:{user_id}"
     
-    # Отправляем ОДНО подтверждение
     bot.send_message(
         user_id,
         "✅ Ваше фото отправлено на модерацию!\n\n"
@@ -91,7 +100,6 @@ def process_single_photo(album_key):
         "❌ Если не появится - значит не прошел модерацию."
     )
     
-    # Отправляем модератору
     bot.send_photo(
         MODERATOR_ID,
         photo,
