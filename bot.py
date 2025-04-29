@@ -2,9 +2,10 @@ import telebot
 import os
 from dotenv import load_dotenv
 
+# Загружаем переменные окружения
 load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
-MODERATOR_ID = 1955832136  # Замените на реальный ID модератора (узнать можно через @userinfobot)
+MODERATOR_ID = 1955832136  # Замените на реальный ID модератора
 
 bot = telebot.TeleBot(TOKEN)
 
