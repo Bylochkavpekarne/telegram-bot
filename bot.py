@@ -2,7 +2,6 @@ import telebot
 import os
 from dotenv import load_dotenv
 from collections import defaultdict
-from datetime import datetime, timedelta
 import threading
 
 load_dotenv()
@@ -12,10 +11,9 @@ MODERATOR_ID = 1955832136
 bot = telebot.TeleBot(TOKEN)
 bot.remove_webhook()
 
-# Хранилище для группировки альбомов
+# Хранилище для альбомов
 user_albums = defaultdict(list)
-album_timers = {}
-pending_confirmations = set()
+active_timers = {}
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -28,73 +26,64 @@ def handle_photo(message):
         photo = message.photo[-1].file_id
         caption = message.caption if message.caption else "Без описания"
         
-        # Если это медиагруппа (альбом), обрабатываем все фото сразу
-        if message.media_group_id:
-            media_group_id = message.media_group_id
-            user_albums[(user_id, media_group_id)].append((photo, caption))
-            
-            # Запускаем таймер только для первого фото в альбоме
-            if (user_id, media_group_id) not in album_timers:
-                album_timers[(user_id, media_group_id)] = threading.Timer(
-                    2.0, process_album, 
-                    args=[user_id, media_group_id]
-                )
-                album_timers[(user_id, media_group_id)].start()
-        else:
-            # Одиночное фото
-            process_single_photo(user_id, photo, caption)
+        # Ключ для группировки: user_id + media_group_id (если есть)
+        album_key = (user_id, message.media_group_id) if message.media_group_id else (user_id, None)
+        
+        # Добавляем фото в альбом
+        user_albums[album_key].append((photo, caption))
+        
+        # Для альбомов: запускаем таймер только один раз
+        if message.media_group_id and album_key not in active_timers:
+            active_timers[album_key] = True
+            threading.Timer(1.5, process_album, args=[album_key]).start()
+        # Для одиночных фото: обрабатываем сразу
+        elif not message.media_group_id:
+            process_single_photo(album_key)
             
     except Exception as e:
         bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
-def process_album(user_id, media_group_id):
+def process_album(album_key):
     """Обрабатывает собранный альбом"""
-    if (user_id, media_group_id) not in user_albums:
+    if album_key not in user_albums:
         return
         
-    album = user_albums[(user_id, media_group_id)]
+    user_id, _ = album_key
+    album = user_albums.pop(album_key)
+    active_timers.pop(album_key, None)
+    
     user = bot.get_chat(user_id)
     username = f"@{user.username}" if user.username else f"ID:{user_id}"
     
-    # Отправляем подтверждение пользователю
-    if len(album) > 1:
-        bot.send_message(
-            user_id,
-            f"✅ Ваш альбом из {len(album)} фото отправлен на модерацию!\n\n"
-            "При успешной проверке контент будет опубликован.\n"
-            "❌ Если не появится - значит не прошел модерацию."
-        )
-    else:
-        bot.send_message(
-            user_id,
-            "✅ Ваше фото отправлено на модерацию!\n\n"
-            "При успешной проверке контент будет опубликован.\n"
-            "❌ Если не появится - значит не прошел модерацию."
-        )
+    # Отправляем ОДНО подтверждение пользователю
+    bot.send_message(
+        user_id,
+        f"✅ Ваш {'альбом' if len(album) > 1 else 'фото'} из {len(album)} {'фото' if len(album) > 1 else ''} отправлен на модерацию!\n\n"
+        "При успешной проверке контент будет опубликован.\n"
+        "❌ Если не появится - значит не прошел модерацию."
+    )
     
     # Отправляем модератору
     media_group = []
     for i, (photo, caption) in enumerate(album):
-        if i == 0:
-            media_group.append(telebot.types.InputMediaPhoto(
-                media=photo,
-                caption=f"Новый контент от {username}\n\nТекст: {caption}"
-            ))
-        else:
-            media_group.append(telebot.types.InputMediaPhoto(media=photo))
+        media_group.append(telebot.types.InputMediaPhoto(
+            media=photo,
+            caption=f"Новый контент от {username}\n\nТекст: {caption}" if i == 0 else None
+        ))
     
     bot.send_media_group(MODERATOR_ID, media_group)
-    
-    # Очищаем
-    del user_albums[(user_id, media_group_id)]
-    del album_timers[(user_id, media_group_id)]
 
-def process_single_photo(user_id, photo, caption):
+def process_single_photo(album_key):
     """Обрабатывает одиночное фото"""
+    user_id, _ = album_key
+    if album_key not in user_albums:
+        return
+        
+    photo, caption = user_albums.pop(album_key)[0]
     user = bot.get_chat(user_id)
     username = f"@{user.username}" if user.username else f"ID:{user_id}"
     
-    # Отправляем подтверждение
+    # Отправляем ОДНО подтверждение
     bot.send_message(
         user_id,
         "✅ Ваше фото отправлено на модерацию!\n\n"
@@ -109,7 +98,6 @@ def process_single_photo(user_id, photo, caption):
         caption=f"Новый контент от {username}\n\nТекст: {caption}"
     )
 
-# Запускаем бота
 if __name__ == '__main__':
     print("Бот запущен...")
     bot.polling(non_stop=True)
